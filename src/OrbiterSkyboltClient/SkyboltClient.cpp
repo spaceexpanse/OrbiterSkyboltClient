@@ -16,12 +16,13 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include "ModelFactory.h"
 #include "OrbiterEntityFactory.h"
 #include "OrbiterModel.h"
-#include "OrbiterTileSource.h"
 #include "ObjectUtil.h"
 #include "OsgSketchpad.h"
 #include "OverlayPanelFactory.h"
 #include "SkyboltClient.h"
 #include "SkyboltParticleStream.h"
+#include "TileSource/OrbiterElevationTileSource.h"
+#include "TileSource/OrbiterImageTileSource.h"
 
 #include <SkyboltEngine/EngineRoot.h>
 #include <SkyboltEngine/EngineRootFactory.h>
@@ -464,8 +465,13 @@ HWND SkyboltClient::clbkCreateRenderWindow()
 		try
 		{
 			mEngineRoot = EngineRootFactory::create({}, settings);
-			mEngineRoot->tileSourceFactoryRegistry->addFactory("orbiter", [](const nlohmann::json& json) {
-				return std::make_shared<OrbiterTileSource>(json.at("url"));
+
+			mEngineRoot->tileSourceFactoryRegistry->addFactory("orbiterElevation", [](const nlohmann::json& json) {
+				return std::make_shared<OrbiterElevationTileSource>(json.at("url"));
+			});
+
+			mEngineRoot->tileSourceFactoryRegistry->addFactory("orbiterImage", [](const nlohmann::json& json) {
+				return std::make_shared<OrbiterImageTileSource>(json.at("url"));
 			});
 		}
 		catch (const std::exception& e)
