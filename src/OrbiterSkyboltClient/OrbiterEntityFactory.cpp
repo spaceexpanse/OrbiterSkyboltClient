@@ -103,12 +103,60 @@ sim::EntityPtr OrbiterEntityFactory::createVessel(OBJHANDLE object, VESSEL* vess
 	return entity;
 }
 
+extern Orbiter *g_pOrbiter;
+
 sim::EntityPtr OrbiterEntityFactory::createPlanet(OBJHANDLE object) const
 {
 	std::string name = getName(object);
-	if (name == "Earth")
+	if (name == "Earth" || name == "Moon")
 	{
-		return mEntityFactory->createEntity("PlanetEarth");
+		double radius = oapiGetSize(object);
+
+		char cbuf[256];
+		mGraphicsClient->PlanetTexturePath(name.c_str(), cbuf);
+		std::string planetTexturePath = cbuf;
+
+		nlohmann::json planetJson = {
+			{"radius", radius},
+			{"ocean", false},
+			{"surface", {
+				{"elevation", {
+					{"format", "orbiterElevation"},
+					{"url", planetTexturePath},
+					{"maxLevel", 9} // MTODO
+				}},
+				{"albedo", {
+					{"format", "orbiterImage"},
+					{"url", planetTexturePath},
+					{"maxLevel", 9}
+				}},
+				{"uniformDetail", {
+					{"texture", "Environment/Ground/Ground026_1K_Color.jpg"}
+				}},
+			}}
+		};
+
+		if (oapiPlanetHasAtmosphere (object))
+		{
+			planetJson["atmosphere"] = {
+				{"earthReyleighScatteringCoefficient", 1.24062e-6},
+				{"rayleighScaleHeight", 8000.0},
+				{"mieScaleHeight", 1200.0},
+				{"mieAngstromAlpha", 0.0},
+				{"mieAngstromBeta", 5.328e-3},
+				{"mieSingleScatteringAlbedo", 0.9},
+				{"miePhaseFunctionG", 0.8},
+				{"useEarthOzone", true}
+			};
+		}
+
+		nlohmann::json j = {
+			{"components", {{
+				{"planet", planetJson}
+			}}}
+		};
+
+		return mEntityFactory->createEntityFromJson(j, name, math::dvec3Zero(), math::dquatIdentity());
 	}
 	return nullptr;
 }

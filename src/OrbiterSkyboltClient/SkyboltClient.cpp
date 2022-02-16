@@ -575,28 +575,9 @@ sim::Matrix3 toSkyboltMatrix3(const MATRIX3& m)
 	return sim::Matrix3(x, z, y);
 }
 
-sim::Vector3 toSkyboltPosFromGlobal(const VECTOR3& gpos)
-{
-	if (g_earth)
-	{
-		sim::LatLonAlt lla;
-		oapiGlobalToEqu(g_earth, gpos, &lla.lon, &lla.lat, &lla.alt);
-		double radius = 6371000;
-		lla.alt -= radius;
-		return sim::llaToGeocentric(lla, radius);
-	}
-	return sim::Vector3(0, 0, 0);
-}
-
 static sim::Quaternion toSkyboltOriFromGlobal(const MATRIX3& m)
 {
-	if (g_earth)
-	{
-		MATRIX3 mat;
-		oapiGetRotationMatrix(g_earth, &mat);
-		return sim::Quaternion(glm::transpose(toSkyboltMatrix3(mat)) * toSkyboltMatrix3(m)) * glm::angleAxis(math::halfPiD(), sim::Vector3(0, 0, 1)) * glm::angleAxis(math::piD(), sim::Vector3(1, 0, 0));
-	}
-	return sim::Quaternion();
+	return sim::Quaternion(toSkyboltMatrix3(m)) * glm::angleAxis(math::halfPiD(), sim::Vector3(0, 0, 1)) * glm::angleAxis(math::piD(), sim::Vector3(1, 0, 0));
 }
 
 static int isVisible(const OrbiterModel& model)
@@ -618,7 +599,7 @@ static void updateCamera(sim::Entity& camera)
 	VECTOR3 gpos;
 	oapiCameraGlobalPos(&gpos);
 
-	setPosition(camera, toSkyboltPosFromGlobal(gpos));
+	setPosition(camera, toSkyboltVector3GlobalAxes(gpos));
 
 	MATRIX3 mat;
 	oapiCameraRotationMatrix(&mat);
@@ -631,7 +612,7 @@ static void updateCamera(sim::Entity& camera)
 static sim::EntityPtr createEntity(const OrbiterEntityFactory& factory, OBJHANDLE object)
 {
 	std::string name = getName(object);
-	if (name == "Earth")
+	if (name == "Moon")
 	{
 		g_earth = object;
 	}
@@ -676,21 +657,30 @@ void SkyboltClient::updateVirtualCockpitTextures(OrbiterModel& model) const
 	}
 }
 
+static sim::Quaternion getOrientationOffset(int objectType)
+{
+	if (objectType == OBJTP_PLANET)
+	{
+		return glm::angleAxis(math::halfPiD(), sim::Vector3(0, 0, 1)) * glm::angleAxis(math::piD(), sim::Vector3(1, 0, 0));
+	}
+	else
+	{
+		return math::dquatIdentity();
+	}
+}
+
 void SkyboltClient::updateEntity(OBJHANDLE object, sim::Entity& entity) const
 {
 	VECTOR3 gpos;
 	oapiGetGlobalPos(object, &gpos);
 
-	VECTOR3 lpos;
-	oapiGlobalToLocal(g_earth, &gpos, &lpos);
-
-	setPosition(entity, toSkyboltPosFromGlobal(gpos));
+	setPosition(entity, toSkyboltVector3GlobalAxes(gpos));
 
 	MATRIX3 mat;
 	oapiGetRotationMatrix(object, &mat);
-	setOrientation(entity, sim::Quaternion(toSkyboltOriFromGlobal(mat)));
+	setOrientation(entity, sim::Quaternion(toSkyboltOriFromGlobal(mat)) * getOrientationOffset(oapiGetObjectType(object)));
 
-	// Update mesh for camera view
+	// Set 3d model visibility appropriately for camera view
 	auto visObject = entity.getFirstComponent<VisObjectsComponent>();
 	if (visObject)
 	{
@@ -747,6 +737,7 @@ void SkyboltClient::translateEntities()
 		}
 	}
 
+	// Create and update entities
 	for (const auto& object : objects)
 	{
 		sim::EntityPtr entity;
@@ -756,8 +747,7 @@ void SkyboltClient::translateEntities()
 			entity = createEntity(*mEntityFactory, object);
 			if (entity)
 			{
-				if (object != g_earth)
-					updateEntity(object, *entity);
+				updateEntity(object, *entity);
 
 				mEngineRoot->simWorld->addEntity(entity);
 			}
@@ -765,8 +755,7 @@ void SkyboltClient::translateEntities()
 		else
 		{
 			entity = it->second;
-			if (object != g_earth)
-				updateEntity(object, *entity);
+			updateEntity(object, *entity);
 		}
 
 		if (entity)
@@ -775,7 +764,19 @@ void SkyboltClient::translateEntities()
 		}
 	}
 
-	// TODO: remove entities
+	// Remove old entities
+	for (const auto& [handle, entity] : mEntities)
+	{
+		if (currentEntities.find(handle) == currentEntities.end())
+		{
+			mEngineRoot->simWorld->removeEntity(entity.get());
+			if (g_earth == handle)
+			{
+				g_earth = nullptr;
+			}
+		}
+	}
+
 	std::swap(currentEntities, mEntities);
 }
 

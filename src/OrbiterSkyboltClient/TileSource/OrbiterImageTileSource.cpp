@@ -13,8 +13,15 @@ OrbiterImageTileSource::~OrbiterImageTileSource() = default;
 
 osg::ref_ptr<osg::Image> OrbiterImageTileSource::createImage(const skybolt::QuadTreeTileKey& key, std::function<bool()> cancelSupplier) const
 {
+	std::scoped_lock<std::mutex> lock(mTreeMgrMutex); // MTODO: support concurrent calls to ReadData
+
 	BYTE *buf;
-	DWORD ndata = mTreeMgr->ReadData(key.level + 4, key.y, key.x, &buf);
+	DWORD ndata = mTreeMgr->ReadData(key.level + 4, key.y, key.x, &buf); // MTODO: wrap in mutex
+
+	if (ndata == 0)
+	{
+		return nullptr;
+	}
 
 	MemoryStreamBuf membuf(reinterpret_cast<char*>(buf), ndata);
 	std::istream istream(&membuf);
@@ -23,9 +30,12 @@ osg::ref_ptr<osg::Image> OrbiterImageTileSource::createImage(const skybolt::Quad
 	osgDB::ReaderWriter::ReadResult res = rw->readImage(istream);
 	osg::ref_ptr<osg::Image> image = res.getImage();
 
+	mTreeMgr->ReleaseData(buf); // MTODO: scoped exit
+
 	if (image)
 	{
 		image->flipVertical();
 	}
+
 	return image;
 }

@@ -35,6 +35,8 @@ struct ELEVFILEHEADER { // file header for patch elevation data file
 osg::ref_ptr<osg::Image> OrbiterElevationTileSource::createImage(const skybolt::QuadTreeTileKey& key, std::function<bool()> cancelSupplier) const
 {
 	BYTE *buf;
+
+	std::scoped_lock<std::mutex> lock(mTreeMgrMutex); // MTODO: support concurrent calls to ReadData
 	DWORD ndata = mTreeMgr->ReadData(key.level + 4, key.y, key.x, &buf);
 
 	if (ndata < sizeof(ELEVFILEHEADER))
@@ -95,6 +97,9 @@ osg::ref_ptr<osg::Image> OrbiterElevationTileSource::createImage(const skybolt::
 			*ptr++ = vis::getHeightmapSeaLevelValueInt() + header.emean;
 		}
 	}
+
+	// MTODO: scoped exit
+	mTreeMgr->ReleaseData(buf);
 
 	return image;
 }

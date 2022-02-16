@@ -12,4 +12,5 @@ public:
 
 private:
 	std::unique_ptr<class ZTreeMgr> mTreeMgr;
+	mutable std::mutex mTreeMgrMutex;
 };
