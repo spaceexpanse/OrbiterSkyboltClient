@@ -57,7 +57,6 @@ namespace oapi {
 
 HINSTANCE g_hInst;
 SkyboltClient* g_client = nullptr;
-OBJHANDLE g_earth = nullptr;
 
 DLLCLBK void InitModule(HINSTANCE hDLL)
 {
@@ -82,7 +81,6 @@ DLLCLBK void ExitModule(HINSTANCE hDLL)
 SkyboltClient::SkyboltClient(HINSTANCE hInstance) :
 	GraphicsClient(hInstance)
 {
-	g_earth = nullptr;
 }
 
 SkyboltClient::~SkyboltClient()
@@ -609,16 +607,6 @@ static void updateCamera(sim::Entity& camera)
 	component->getState().fovY = float(oapiCameraAperture()) * 2.0f;
 }
 
-static sim::EntityPtr createEntity(const OrbiterEntityFactory& factory, OBJHANDLE object)
-{
-	std::string name = getName(object);
-	if (name == "Moon")
-	{
-		g_earth = object;
-	}
-	return factory.createEntity(object);
-}
-
 void SkyboltClient::updateVirtualCockpitTextures(OrbiterModel& model) const
 {
 	auto program = mEngineRoot->programs.getRequiredProgram("unlitTextured");
@@ -717,34 +705,86 @@ SURFHANDLE SkyboltClient::getSurfaceHandleFromTextureId(MESHHANDLE mesh, int id)
 	}
 }
 
-void SkyboltClient::translateEntities()
+static OBJHANDLE getNearestObject(const std::vector<OBJHANDLE>& objects)
 {
-	std::map<OBJHANDLE, skybolt::sim::EntityPtr> currentEntities;
+	OBJHANDLE nearest = nullptr;
+	double nearestDistance;
+	for (const auto& object : objects)
+	{
+		VECTOR3 objectPos;
+		oapiGetGlobalPos(object, &objectPos);
 
+		VECTOR3 cameraPos;
+		oapiCameraGlobalPos(&cameraPos);
+		VECTOR3 diff = cameraPos - objectPos;
+		double distance = dotp(diff, diff);
+
+		if (!nearest || distance < nearestDistance)
+		{
+			nearest = object;
+			nearestDistance = distance;
+		}
+	}
+	return nearest;
+}
+
+static std::vector<OBJHANDLE> getObjectsToRender()
+{
 	std::vector<OBJHANDLE> objects;
+	std::vector<OBJHANDLE> planets;
 	int objectCount = oapiGetObjectCount();
 	for (int i = 0; i < objectCount; ++i)
 	{
-		objects.push_back(oapiGetObjectByIndex(i));
+		OBJHANDLE object = oapiGetObjectByIndex(i);
+		int type = oapiGetObjectType(object);
+		if (type == OBJTP_PLANET)
+		{
+			planets.push_back(object);
+		}
+		else if (type != OBJTP_SURFBASE)
+		{
+			objects.push_back(object);
+		}
 	}
 
-	if (g_earth)
+	// Only render the nearest planet and its bases
+	OBJHANDLE planet = getNearestObject(planets);
+	if (planet)
 	{
-		objectCount = oapiGetBaseCount(g_earth);
+		objects.push_back(planet);
+		objectCount = oapiGetBaseCount(planet);
 		for (int i = 0; i < objectCount; ++i)
 		{
-			objects.push_back(oapiGetBaseByIndex(g_earth, i));
+			objects.push_back(oapiGetBaseByIndex(planet, i));
+		}
+	}
+	return objects;
+}
+
+void SkyboltClient::translateEntities()
+{
+
+	std::vector<OBJHANDLE> objects = getObjectsToRender();
+
+	// Remove old entities
+	std::set<OBJHANDLE> objectsSet(objects.begin(), objects.end());
+	for (const auto& [handle, entity] : mEntities)
+	{
+		if (objectsSet.find(handle) == objectsSet.end())
+		{
+			mEngineRoot->simWorld->removeEntity(entity.get());
 		}
 	}
 
 	// Create and update entities
+	std::map<OBJHANDLE, skybolt::sim::EntityPtr> currentEntities;
 	for (const auto& object : objects)
 	{
 		sim::EntityPtr entity;
 		auto it = mEntities.find(object);
 		if (it == mEntities.end())
 		{
-			entity = createEntity(*mEntityFactory, object);
+			entity = mEntityFactory->createEntity(object);
 			if (entity)
 			{
 				updateEntity(object, *entity);
@@ -761,19 +801,6 @@ void SkyboltClient::translateEntities()
 		if (entity)
 		{
 			currentEntities[object] = entity;
-		}
-	}
-
-	// Remove old entities
-	for (const auto& [handle, entity] : mEntities)
-	{
-		if (currentEntities.find(handle) == currentEntities.end())
-		{
-			mEngineRoot->simWorld->removeEntity(entity.get());
-			if (g_earth == handle)
-			{
-				g_earth = nullptr;
-			}
 		}
 	}
 

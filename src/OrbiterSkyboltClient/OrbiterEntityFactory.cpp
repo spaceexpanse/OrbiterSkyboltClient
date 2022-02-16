@@ -108,35 +108,40 @@ extern Orbiter *g_pOrbiter;
 sim::EntityPtr OrbiterEntityFactory::createPlanet(OBJHANDLE object) const
 {
 	std::string name = getName(object);
-	if (name == "Earth" || name == "Moon")
+
+	double radius = oapiGetSize(object);
+
+	char cbuf[256];
+	mGraphicsClient->PlanetTexturePath(name.c_str(), cbuf);
+	std::string planetTexturePath = cbuf;
+
+	nlohmann::json planetJson = {
+		{"radius", radius},
+		{"ocean", false},
+		{"surface", {
+			{"elevation", {
+				{"format", "orbiterElevation"},
+				{"url", planetTexturePath},
+				{"maxLevel", 9} // MTODO
+			}},
+			{"albedo", {
+				{"format", "orbiterImage"},
+				{"url", planetTexturePath},
+				{"maxLevel", 9}
+			}},
+			{"uniformDetail", {
+				{"texture", "Environment/Ground/Ground026_1K_Color.jpg"}
+			}},
+		}}
+	};
+
+	if (oapiPlanetHasAtmosphere(object))
 	{
-		double radius = oapiGetSize(object);
-
-		char cbuf[256];
-		mGraphicsClient->PlanetTexturePath(name.c_str(), cbuf);
-		std::string planetTexturePath = cbuf;
-
-		nlohmann::json planetJson = {
-			{"radius", radius},
-			{"ocean", false},
-			{"surface", {
-				{"elevation", {
-					{"format", "orbiterElevation"},
-					{"url", planetTexturePath},
-					{"maxLevel", 9} // MTODO
-				}},
-				{"albedo", {
-					{"format", "orbiterImage"},
-					{"url", planetTexturePath},
-					{"maxLevel", 9}
-				}},
-				{"uniformDetail", {
-					{"texture", "Environment/Ground/Ground026_1K_Color.jpg"}
-				}},
-			}}
-		};
-
-		if (oapiPlanetHasAtmosphere (object))
+		// TODO: Map constants to our scattering model for planets other than Earth.
+		// Earth should always use the most accurate parameters from Bruenton's model.
+		//const ATMCONST* constants = oapiGetPlanetAtmConstants(object);
+		
+		if (name == "Earth")
 		{
 			planetJson["atmosphere"] = {
 				{"earthReyleighScatteringCoefficient", 1.24062e-6},
@@ -149,16 +154,31 @@ sim::EntityPtr OrbiterEntityFactory::createPlanet(OBJHANDLE object) const
 				{"useEarthOzone", true}
 			};
 		}
-
-		nlohmann::json j = {
-			{"components", {{
-				{"planet", planetJson}
-			}}}
-		};
-
-		return mEntityFactory->createEntityFromJson(j, name, math::dvec3Zero(), math::dquatIdentity());
+		else if (name == "Mars")
+		{
+			planetJson["atmosphere"] = {
+				{"reyleighScatteringCoefficientTable", {
+					{"coefficients", {5.8e-6, 5.8e-6, 20.0e-6}},
+					{"wavelengthsNm", {440, 510, 680}},
+				}},
+				{"rayleighScaleHeight", 11000.0},
+				{"mieScaleHeight", 1200.0},
+				{"mieAngstromAlpha", 0.0},
+				{"mieAngstromBeta", 5.328e-3},
+				{"mieSingleScatteringAlbedo", 0.9},
+				{"miePhaseFunctionG", 0.8},
+				{"useEarthOzone", true}
+			};
+		}
 	}
-	return nullptr;
+
+	nlohmann::json j = {
+		{"components", {{
+			{"planet", planetJson}
+		}}}
+	};
+
+	return mEntityFactory->createEntityFromJson(j, name, math::dvec3Zero(), math::dquatIdentity());
 }
 
 sim::EntityPtr OrbiterEntityFactory::createBase(OBJHANDLE object) const

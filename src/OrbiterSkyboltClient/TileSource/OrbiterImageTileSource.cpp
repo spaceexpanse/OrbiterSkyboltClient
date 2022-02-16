@@ -7,12 +7,22 @@
 OrbiterImageTileSource::OrbiterImageTileSource(const std::string& directory)
 {
 	mTreeMgr = std::make_unique<ZTreeMgr>(directory.c_str(), ZTreeMgr::LAYER_SURF);
+
+	if (mTreeMgr->TOC().size() == 0) // If load failed
+	{
+		mTreeMgr.reset();
+	}
 }
 
 OrbiterImageTileSource::~OrbiterImageTileSource() = default;
 
 osg::ref_ptr<osg::Image> OrbiterImageTileSource::createImage(const skybolt::QuadTreeTileKey& key, std::function<bool()> cancelSupplier) const
 {
+	if (!mTreeMgr)
+	{
+		return nullptr;
+	}
+
 	std::scoped_lock<std::mutex> lock(mTreeMgrMutex); // MTODO: support concurrent calls to ReadData
 
 	BYTE *buf;

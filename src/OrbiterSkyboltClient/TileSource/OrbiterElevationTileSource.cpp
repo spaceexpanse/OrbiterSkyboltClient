@@ -9,6 +9,10 @@ using namespace skybolt;
 OrbiterElevationTileSource::OrbiterElevationTileSource(const std::string& directory)
 {
 	mTreeMgr = std::make_unique<ZTreeMgr>(directory.c_str(), ZTreeMgr::LAYER_ELEV);
+	if (mTreeMgr->TOC().size() == 0) // If load failed
+	{
+		mTreeMgr.reset();
+	}
 }
 
 OrbiterElevationTileSource::~OrbiterElevationTileSource() = default;
@@ -34,6 +38,11 @@ struct ELEVFILEHEADER { // file header for patch elevation data file
 
 osg::ref_ptr<osg::Image> OrbiterElevationTileSource::createImage(const skybolt::QuadTreeTileKey& key, std::function<bool()> cancelSupplier) const
 {
+	if (!mTreeMgr)
+	{
+		return nullptr;
+	}
+
 	BYTE *buf;
 
 	std::scoped_lock<std::mutex> lock(mTreeMgrMutex); // MTODO: support concurrent calls to ReadData

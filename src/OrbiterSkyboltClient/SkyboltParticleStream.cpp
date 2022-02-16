@@ -13,7 +13,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include <osgDB/readFile>
+#include <osgDB/ReadFile>
 
 using namespace skybolt;
 using namespace sim;
