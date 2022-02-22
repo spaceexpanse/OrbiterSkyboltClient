@@ -184,6 +184,7 @@ ParticleStream* SkyboltClient::clbkCreateReentryStream(PARTICLESTREAMSPEC *pss,
 	OBJHANDLE hVessel)
 {
 	return new ParticleStream(this, pss);
+	// TODO
 	//auto stream = clbkCreateParticleStream(pss);
 	//stream->Attach(hVessel);
 	//return stream;
@@ -444,7 +445,7 @@ HWND SkyboltClient::clbkCreateRenderWindow()
 	
 	mGldc = GetDC(hWnd);
 	createOpenGlContext(mGldc);
-	//glEnable(GL_DEPTH_CLAMP); // MTODO
+	glEnable(GL_DEPTH_CLAMP); // MTODO
 	{
 		// Create engine
 		file::Path settingsFilename = file::getAppUserDataDirectory("Skybolt").append("Settings.json");
@@ -498,6 +499,7 @@ HWND SkyboltClient::clbkCreateRenderWindow()
 			config.entityFactory = mEngineRoot->entityFactory.get();
 			config.scene = mEngineRoot->scene;
 			config.modelFactory = modelFactory;
+			config.shaderPrograms = &mEngineRoot->programs;
 
 			mEntityFactory = std::make_unique<OrbiterEntityFactory>(config);
 		}
@@ -522,8 +524,6 @@ HWND SkyboltClient::clbkCreateRenderWindow()
 	}
 
 	mEngineRoot->simWorld->addEntity(mEngineRoot->entityFactory->createEntity("Stars"));
-	mEngineRoot->simWorld->addEntity(mEngineRoot->entityFactory->createEntity("SunBillboard"));
-	mEngineRoot->simWorld->addEntity(mEngineRoot->entityFactory->createEntity("MoonBillboard"));
 
 	RECT rect;
 	GetClientRect(hWnd, &rect);
@@ -809,19 +809,6 @@ void SkyboltClient::translateEntities()
 
 void SkyboltClient::clbkRenderScene()
 {
-	//return;
-	/*
-	while (GetRenderWindow())
-	{
-		MSG msg;
-		BOOL result = PeekMessageA(&msg, GetRenderWindow(), 0, 0, PM_REMOVE);
-		if (!result)
-		{
-			break;
-		}
-		RenderWndProc(msg.hwnd, msg.message, msg.wParam, msg.lParam);
-	}
-	*/
 	mEngineRoot->scenario.startJulianDate = oapiGetSimMJD() + 2400000.5;
 	updateCamera(*mSimCamera);
 	translateEntities();
