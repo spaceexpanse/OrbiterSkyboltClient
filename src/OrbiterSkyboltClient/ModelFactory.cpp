@@ -16,8 +16,11 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <SkyboltVis/OsgStateSetHelpers.h>
 #include <SkyboltVis/OsgGeometryFactory.h>
 #include <SkyboltVis/OsgGeometryHelpers.h>
+#include <osg/BlendEquation>
+#include <osg/BlendFunc>
 #include <osg/Geode>
 #include <osg/Geometry>
+#include <osg/CullFace>
 
 #include <assert.h>
 
@@ -31,14 +34,14 @@ ModelFactory::ModelFactory(const ModelFactoryConfig& config) :
 {
 }
 
-std::unique_ptr<OrbiterModel> ModelFactory::createModel(MESHHANDLE hMesh, OBJHANDLE handle, int meshId, int meshVisibilityMode) const
+std::unique_ptr<OrbiterModel> ModelFactory::createModel(MESHHANDLE hMesh, OBJHANDLE handle, int meshId, int meshVisibilityCategoryFlags) const
 {
 	auto result = getOrCreateMesh(hMesh);
 	OrbiterModelConfig config;
 	config.node = result.node;
 	config.owningObject = handle;
 	config.meshId = meshId;
-	config.meshVisibilityMode = meshVisibilityMode;
+	config.meshVisibilityCategoryFlags = meshVisibilityCategoryFlags;
 	config.meshGroupToGeometryIndex = result.meshGroupToGeometryIndex;
 	return std::make_unique<OrbiterModel>(config);
 }
@@ -130,7 +133,6 @@ ModelFactory::CreateMeshResult ModelFactory::getOrCreateMesh(MESHHANDLE mesh) co
 	}
 }
 
-
 static osg::Vec4f toOsgVec4f(const COLOUR4& c)
 {
 	return reinterpret_cast<const osg::Vec4f&>(c);
@@ -156,6 +158,12 @@ void ModelFactory::populateStateSet(osg::StateSet& stateSet, MESHHANDLE mesh, co
 		{
 			stateSet.setTextureAttributeAndModes(0, texture);
 			stateSet.addUniform(vis::createUniformSampler2d("albedoSampler", 0));
+
+			// All textured models in orbiter are rendered with alpha blending. They should be drawn in creation order, not transparent sorted.
+			// TODO: See if we can improve performance by disabling blending on models that don't need it. Unfortunatly orbiter doesn't
+			// seem to provide this information.
+			stateSet.setAttributeAndModes(new osg::BlendEquation(osg::BlendEquation::FUNC_ADD, osg::BlendEquation::FUNC_ADD));
+			stateSet.setAttributeAndModes(new osg::BlendFunc(osg::BlendFunc::SRC_ALPHA, osg::BlendFunc::ONE_MINUS_SRC_ALPHA));
 		}
 		else
 		{
@@ -176,6 +184,5 @@ void ModelFactory::populateStateSet(osg::StateSet& stateSet, MESHHANDLE mesh, co
 	{
 		// MFD texture will be set later
 		stateSet.addUniform(vis::createUniformSampler2d("albedoSampler", 0));
-		vis::makeStateSetTransparent(stateSet, vis::TransparencyMode::Classic);
 	}
 }

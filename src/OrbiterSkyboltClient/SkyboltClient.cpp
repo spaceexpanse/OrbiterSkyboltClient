@@ -7,7 +7,6 @@ The above copyright notice and this permission notice shall be included in all c
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
-
 #include "OpenGlContext.h"
 
 #define ORBITER_MODULE
@@ -15,15 +14,19 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 #include "ModelFactory.h"
 #include "OrbiterEntityFactory.h"
-#include "ObjectUtil.h"
 #include "OrbiterModel.h"
+#include "ObjectUtil.h"
 #include "OsgSketchpad.h"
 #include "OverlayPanelFactory.h"
 #include "SkyboltClient.h"
 #include "SkyboltParticleStream.h"
+#include "VideoTab.h"
+#include "TileSource/OrbiterElevationTileSource.h"
+#include "TileSource/OrbiterImageTileSource.h"
 
 #include <SkyboltEngine/EngineRoot.h>
 #include <SkyboltEngine/EngineRootFactory.h>
+#include <SkyboltEngine/EngineSettings.h>
 #include <SkyboltEngine/SimVisBinding/CameraSimVisBinding.h>
 #include <SkyboltEngine/VisObjectsComponent.h>
 #include <SkyboltSim/Entity.h>
@@ -42,12 +45,19 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <SkyboltSim/Spatial/Geocentric.h>
 #include <SkyboltSim/System/SimStepper.h>
 #include <SkyboltSim/System/System.h>
+#include <SkyboltVis/VisibilityCategory.h>
 #include <SkyboltVis/Window/EmbeddedWindow.h>
 #include <SkyboltCommon/MapUtility.h>
 #include <SkyboltCommon/File/OsDirectories.h>
 #include <SkyboltCommon/Json/ReadJsonFile.h>
+#include <SkyboltCommon/Json/WriteJsonFile.h>
 
 #include <osgDB/ReadFile>
+#include <boost/log/sinks/basic_sink_backend.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/trivial.hpp>
+
+#include <Windows.h>
 
 using namespace skybolt;
 
@@ -55,7 +65,6 @@ namespace oapi {
 
 HINSTANCE g_hInst;
 SkyboltClient* g_client = nullptr;
-OBJHANDLE g_earth = nullptr;
 
 DLLCLBK void InitModule(HINSTANCE hDLL)
 {
@@ -77,10 +86,23 @@ DLLCLBK void ExitModule(HINSTANCE hDLL)
 	}
 }
 
+static void forwardBoostLogToOrbiter()
+{
+	namespace sinks = boost::log::sinks;
+
+	struct Sink : public sinks::basic_formatted_sink_backend<char, sinks::concurrent_feeding>
+	{
+		void consume(const boost::log::record_view& rec, const std::string& str)
+		{
+			oapiWriteLog(const_cast<char*>(str.c_str()));
+		}
+	};
+	boost::log::core::get()->add_sink(boost::make_shared<sinks::synchronous_sink<Sink>>());
+}
+
 SkyboltClient::SkyboltClient(HINSTANCE hInstance) :
 	GraphicsClient(hInstance)
 {
-	g_earth = nullptr;
 }
 
 SkyboltClient::~SkyboltClient()
@@ -89,11 +111,22 @@ SkyboltClient::~SkyboltClient()
 
 bool SkyboltClient::clbkInitialise()
 {
-	return GraphicsClient::clbkInitialise();
+	bool success = GraphicsClient::clbkInitialise();
 	// Don't create engine here because clbkInitialise is called by DllMain()
 	// where it's illegal to create threads. We will delay creation of the engine
 	// until the first frame needs to be rendered, where threads can be safely created.
 	// See https://stackoverflow.com/questions/1688290/creating-a-thread-in-dllmain
+
+	forwardBoostLogToOrbiter();
+
+	mVideoTab = std::make_unique<VideoTab>(this, ModuleInstance(), OrbiterInstance(), LaunchpadVideoTab());
+
+	return success;
+}
+
+void SkyboltClient::clbkRefreshVideoData()
+{
+	mVideoTab->UpdateConfigData();
 }
 
 static osg::ref_ptr<osg::Texture2D> readAlbedoTexture(const std::string& filename)
@@ -184,6 +217,7 @@ ParticleStream* SkyboltClient::clbkCreateReentryStream(PARTICLESTREAMSPEC *pss,
 	OBJHANDLE hVessel)
 {
 	return new ParticleStream(this, pss);
+	// TODO
 	//auto stream = clbkCreateParticleStream(pss);
 	//stream->Attach(hVessel);
 	//return stream;
@@ -201,12 +235,12 @@ LRESULT SkyboltClient::RenderWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
 
 INT_PTR SkyboltClient::LaunchpadVideoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-	return false;
+	return mVideoTab ? mVideoTab->WndProc(hWnd, uMsg, wParam, lParam) : FALSE;
 }
 
 bool SkyboltClient::clbkFullscreenMode() const
 {
-	return false;
+	return const_cast<SkyboltClient*>(this)->GetVideoData()->fullscreen;
 }
 
 void SkyboltClient::clbkGetViewportSize(DWORD *width, DWORD *height) const
@@ -273,7 +307,7 @@ SURFHANDLE SkyboltClient::clbkCreateSurfaceEx(DWORD w, DWORD h, DWORD attrib)
 		if (w == 0 || h == 0 || w > 4096 || h > 4096)
 		{
 			return nullptr;
-			//throw std::runtime_error("Invalid render target size requested: " + std::to_string(w) + " x " + std::to_string(h));
+			BOOST_LOG_TRIVIAL(error) << "Invalid render target size requested: " << w << " x " << h;
 		}
 
 		osg::ref_ptr<osg::Camera> camera = createSketchpadCamera(texture);
@@ -284,7 +318,7 @@ SURFHANDLE SkyboltClient::clbkCreateSurfaceEx(DWORD w, DWORD h, DWORD attrib)
 
 		if (attrib & OAPISURFACE_SKETCHPAD)
 		{
-			auto sketchpad = std::make_shared<OsgSketchpad>(camera, handle);
+			auto sketchpad = std::make_shared<OsgSketchpad>(camera, handle, m_nanoVgContext);
 			mSketchpads[handle] = sketchpad;
 		}
 
@@ -433,41 +467,100 @@ void SkyboltClient::clbkReleaseBrush(Brush* brush) const
 	mBrushes.erase(brush);
 }
 
-static void WriteLog(const std::string& str)
+static void appendToPathEnvironmentVariable(const std::string& path)
 {
-	oapiWriteLog(const_cast<char*>(str.c_str()));
+	const char* pathEnvVar = getenv("PATH");
+	pathEnvVar ?
+		_putenv(("PATH=" + std::string(pathEnvVar) + ";" + path).c_str())
+		: _putenv(("PATH=" + path).c_str());
+}
+
+static nlohmann::json readSettings(const std::filesystem::path& filename)
+{
+	nlohmann::json settings;
+	if (std::filesystem::exists(filename))
+	{
+		BOOST_LOG_TRIVIAL(info) << "Reading settings file '" << filename.string() << "'";
+		settings = readJsonFile(filename.string());
+	}
+	else
+	{
+		 // Settings file does not exist. Create it.
+		settings = R"({
+"tileApiKeys": {
+	"bing": "",
+	"mapbox": ""
+},
+"display": {
+	"multiSampleCount": 4
+},
+"shadows": {
+	"enabled": true,
+	"textureSize": 2048,
+	"cascadeBoundingDistances": [0.02, 2.0,  20.0, 130.0, 7000]
+}
+})"_json;
+
+		BOOST_LOG_TRIVIAL(info) << "Creating settings file with defaults: " << filename.string();
+		std::filesystem::create_directories(filename.parent_path());
+		writeJsonFile(settings, filename.string());
+	}
+	return settings;
 }
 
 HWND SkyboltClient::clbkCreateRenderWindow()
 {
-	HWND hWnd = GraphicsClient::clbkCreateRenderWindow();
-	
-	mGldc = GetDC(hWnd);
-	createOpenGlContext(mGldc);
-
+	try
 	{
+		// Create Win32 window
+		HWND hWnd;
+		char *strWndClass = "Orbiter Render Window";
+		if (GetVideoData()->fullscreen)
+		{
+			int width = GetSystemMetrics(SM_CXSCREEN);
+			int height = GetSystemMetrics(SM_CYSCREEN);
+
+			hWnd = CreateWindow (strWndClass, "",
+				WS_POPUP | WS_VISIBLE,
+				CW_USEDEFAULT, CW_USEDEFAULT, width, height, 0, 0, hModule, (LPVOID)this);
+
+			SetWindowPos(hWnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+		} else {
+			hWnd = CreateWindow (strWndClass, "",
+				WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+				CW_USEDEFAULT, CW_USEDEFAULT, GetVideoData()->winw, GetVideoData()->winh, 0, 0, hModule, (LPVOID)this);
+		}
+	
+		mGldc = GetDC(hWnd);
+		createOpenGlContext(mGldc);
+
+		// Setup paths
+		auto binDir = std::filesystem::current_path() / "Modules/Plugin/OrbiterSkyboltClient";
+		if (!std::filesystem::exists(binDir))
+		{
+			throw std::runtime_error("Could not find skybolt plugin folder: " + binDir.string());
+		}
+
+#ifndef OSG_LIBRARY_STATIC
+		appendToPathEnvironmentVariable(binDir.string()); // allow shared library build to find OSG plugin DLLS
+#endif
+		_putenv(("SKYBOLT_ASSETS_PATH=" + binDir.string() + "/Assets").c_str()); // TODO: pass path into engine directly without using environment variable
+
 		// Create engine
-		file::Path settingsFilename = file::getAppUserDataDirectory("Skybolt").append("Settings.json");
+		file::Path settingsFilename = file::getAppUserDataDirectory("OrbiterSkybolt").append("Settings.json");
 
-		nlohmann::json settings;
-		if (std::filesystem::exists(settingsFilename))
-		{
-			WriteLog(std::string("Reading Skybolt settings file '" + settingsFilename.string() + "'"));
-			settings = readJsonFile(settingsFilename.string());
-		}
-		else
-		{
-			WriteLog(std::string("Settings file not found: '" + settingsFilename.string() + "'"));
-		}
+		nlohmann::json settings = readSettings(settingsFilename);
 
-		try
-		{
-			mEngineRoot = EngineRootFactory::create({}, settings);
-		}
-		catch (const std::exception& e)
-		{
-			oapiWriteLogV(e.what());
-		}
+		mEngineRoot = EngineRootFactory::create({}, settings);
+
+		mEngineRoot->tileSourceFactoryRegistry->addFactory("orbiterElevation", [](const nlohmann::json& json) {
+			return std::make_shared<OrbiterElevationTileSource>(json.at("url"));
+		});
+
+		mEngineRoot->tileSourceFactoryRegistry->addFactory("orbiterImage", [](const nlohmann::json& json) {
+			return std::make_shared<OrbiterImageTileSource>(json.at("url"));
+		});
 
 		auto textureProvider = [this](SURFHANDLE surface) {
 			return findOptional(mTextures, surface).get_value_or(nullptr);
@@ -490,6 +583,7 @@ HWND SkyboltClient::clbkCreateRenderWindow()
 			config.entityFactory = mEngineRoot->entityFactory.get();
 			config.scene = mEngineRoot->scene;
 			config.modelFactory = modelFactory;
+			config.shaderPrograms = &mEngineRoot->programs;
 
 			mEntityFactory = std::make_unique<OrbiterEntityFactory>(config);
 		}
@@ -511,43 +605,54 @@ HWND SkyboltClient::clbkCreateRenderWindow()
 		cameraController->selectController("Null");
 
 		mEngineRoot->simWorld->addEntity(mSimCamera);
+
+		// Create starfield
+		mEngineRoot->simWorld->addEntity(mEngineRoot->entityFactory->createEntity("Stars"));
+
+		// Create skybolt embedded window
+		RECT rect;
+		GetClientRect(hWnd, &rect);
+
+		vis::EmbeddedWindowConfig windowConfig;
+		windowConfig.rect = vis::RectI(0, 0, rect.right - rect.left, rect.bottom - rect.top);
+		windowConfig.displaySettings = skybolt::getDisplaySettingsFromEngineSettings(settings);
+		mWindow = std::make_unique<vis::EmbeddedWindow>(windowConfig);
+
+		// Attach camera to window
+		osg::ref_ptr<vis::RenderTarget> viewport = createAndAddViewportToWindow(*mWindow, mEngineRoot->programs.getRequiredProgram("compositeFinal"));
+		viewport->setScene(std::make_shared<vis::RenderTargetSceneAdapter>(mEngineRoot->scene));
+		viewport->setCamera(getVisCamera(*mSimCamera));
+
+		// Setup blitter
+		{
+			osg::ref_ptr<osg::Camera> osgCamera = mWindow->getRenderTargets().front().target->getOsgCamera();
+			mTextureBlitter = new TextureBlitter();
+			osgCamera->addPreDrawCallback(mTextureBlitter);
+		}
+
+		// Create NanoVG context for drawing HUD
+		m_nanoVgContext = CreateNanoVgContext();
+
+		// Create HUD panel overlay
+		{
+			mPanelGroup = new osg::Group();
+			osg::ref_ptr<osg::Camera> osgCamera = mWindow->getRenderTargets().back().target->getOsgCamera();
+			osgCamera->addChild(mPanelGroup);
+
+			auto program = mEngineRoot->programs.getRequiredProgram("hudGeometry");
+			auto stateSet = mPanelGroup->getOrCreateStateSet();
+			stateSet->setAttribute(program);
+			stateSet->setMode(GL_DEPTH_TEST, osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE);
+			vis::makeStateSetTransparent(*stateSet, vis::TransparencyMode::Classic);
+		}
+
+		return hWnd;
 	}
-
-	mEngineRoot->simWorld->addEntity(mEngineRoot->entityFactory->createEntity("Stars"));
-	mEngineRoot->simWorld->addEntity(mEngineRoot->entityFactory->createEntity("SunBillboard"));
-	mEngineRoot->simWorld->addEntity(mEngineRoot->entityFactory->createEntity("MoonBillboard"));
-
-	RECT rect;
-	GetClientRect(hWnd, &rect);
-
-	mWindow = std::make_unique<vis::EmbeddedWindow>(rect.right - rect.left, rect.bottom - rect.top);
-
-	// Attach camera to window
-	osg::ref_ptr<vis::RenderTarget> viewport = createAndAddViewportToWindow(*mWindow, mEngineRoot->programs.getRequiredProgram("compositeFinal"));
-	viewport->setScene(std::make_shared<vis::RenderTargetSceneAdapter>(mEngineRoot->scene));
-	viewport->setCamera(getVisCamera(*mSimCamera));
-
-	// Setup blitter
+	catch (const std::exception& e)
 	{
-		osg::ref_ptr<osg::Camera> osgCamera = mWindow->getRenderTargets().front().target->getOsgCamera();
-		mTextureBlitter = new TextureBlitter();
-		osgCamera->addPreDrawCallback(mTextureBlitter);
+		BOOST_LOG_TRIVIAL(error) << e.what();
+		return nullptr;
 	}
-
-	// Create HUD panel overlay
-	{
-		mPanelGroup = new osg::Group();
-		osg::ref_ptr<osg::Camera> osgCamera = mWindow->getRenderTargets().back().target->getOsgCamera();
-		osgCamera->addChild(mPanelGroup);
-
-		auto program = mEngineRoot->programs.getRequiredProgram("hudGeometry");
-		auto stateSet = mPanelGroup->getOrCreateStateSet();
-		stateSet->setAttribute(program);
-		stateSet->setMode(GL_DEPTH_TEST, osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE);
-		vis::makeStateSetTransparent(*stateSet, vis::TransparencyMode::Classic);
-	}
-
-	return hWnd;
 }
 
 void SkyboltClient::clbkDestroyRenderWindow(bool fastclose)
@@ -565,42 +670,31 @@ sim::Matrix3 toSkyboltMatrix3(const MATRIX3& m)
 	return sim::Matrix3(x, z, y);
 }
 
-sim::Vector3 toSkyboltPosFromGlobal(const VECTOR3& gpos)
-{
-	if (g_earth)
-	{
-		sim::LatLonAlt lla;
-		oapiGlobalToEqu(g_earth, gpos, &lla.lon, &lla.lat, &lla.alt);
-		double radius = 6371000;
-		lla.alt -= radius;
-		return sim::llaToGeocentric(lla, radius);
-	}
-	return sim::Vector3(0, 0, 0);
-}
-
 static sim::Quaternion toSkyboltOriFromGlobal(const MATRIX3& m)
 {
-	if (g_earth)
-	{
-		MATRIX3 mat;
-		oapiGetRotationMatrix(g_earth, &mat);
-		return sim::Quaternion(glm::transpose(toSkyboltMatrix3(mat)) * toSkyboltMatrix3(m)) * glm::angleAxis(math::halfPiD(), sim::Vector3(0, 0, 1)) * glm::angleAxis(math::piD(), sim::Vector3(1, 0, 0));
-	}
-	return sim::Quaternion();
+	return sim::Quaternion(toSkyboltMatrix3(m)) * glm::angleAxis(math::halfPiD(), sim::Vector3(0, 0, 1)) * glm::angleAxis(math::piD(), sim::Vector3(1, 0, 0));
 }
 
-static int isVisible(const OrbiterModel& model)
+static int getMainCameraVisibilityMask(const OrbiterModel& model)
 {
-	int vismode = model.getMeshVisibilityMode();
-
 	if (oapiCameraInternal() && model.getOwningObject() == oapiGetFocusObject())
 	{
-		return (oapiCockpitMode() == COCKPIT_VIRTUAL) ? (vismode & MESHVIS_VC) : (vismode & MESHVIS_COCKPIT);
+		return (oapiCockpitMode() == COCKPIT_VIRTUAL) ? MESHVIS_VC : MESHVIS_COCKPIT;
 	}
 	else
 	{
-		return vismode & MESHVIS_EXTERNAL;
+		return MESHVIS_EXTERNAL;
 	}
+}
+
+static int isVisibleInMainCamera(const OrbiterModel& model)
+{
+	return model.getMeshVisibilityCategoryFlags() & getMainCameraVisibilityMask(model);
+}
+
+static int isVisibleInShadowCamera(const OrbiterModel& model)
+{
+	return model.getMeshVisibilityCategoryFlags() & MESHVIS_EXTERNAL;
 }
 
 static void updateCamera(sim::Entity& camera)
@@ -608,7 +702,7 @@ static void updateCamera(sim::Entity& camera)
 	VECTOR3 gpos;
 	oapiCameraGlobalPos(&gpos);
 
-	setPosition(camera, toSkyboltPosFromGlobal(gpos));
+	setPosition(camera, toSkyboltVector3GlobalAxes(gpos));
 
 	MATRIX3 mat;
 	oapiCameraRotationMatrix(&mat);
@@ -616,16 +710,6 @@ static void updateCamera(sim::Entity& camera)
 
 	auto component = camera.getFirstComponentRequired<sim::CameraComponent>();
 	component->getState().fovY = float(oapiCameraAperture()) * 2.0f;
-}
-
-static sim::EntityPtr createEntity(const OrbiterEntityFactory& factory, OBJHANDLE object)
-{
-	std::string name = getName(object);
-	if (name == "Earth")
-	{
-		g_earth = object;
-	}
-	return factory.createEntity(object);
 }
 
 void SkyboltClient::updateVirtualCockpitTextures(OrbiterModel& model) const
@@ -666,21 +750,30 @@ void SkyboltClient::updateVirtualCockpitTextures(OrbiterModel& model) const
 	}
 }
 
+static sim::Quaternion getOrientationOffset(int objectType)
+{
+	if (objectType == OBJTP_PLANET)
+	{
+		return glm::angleAxis(math::halfPiD(), sim::Vector3(0, 0, 1)) * glm::angleAxis(math::piD(), sim::Vector3(1, 0, 0));
+	}
+	else
+	{
+		return math::dquatIdentity();
+	}
+}
+
 void SkyboltClient::updateEntity(OBJHANDLE object, sim::Entity& entity) const
 {
 	VECTOR3 gpos;
 	oapiGetGlobalPos(object, &gpos);
 
-	VECTOR3 lpos;
-	oapiGlobalToLocal(g_earth, &gpos, &lpos);
-
-	setPosition(entity, toSkyboltPosFromGlobal(gpos));
+	setPosition(entity, toSkyboltVector3GlobalAxes(gpos));
 
 	MATRIX3 mat;
 	oapiGetRotationMatrix(object, &mat);
-	setOrientation(entity, sim::Quaternion(toSkyboltOriFromGlobal(mat)));
+	setOrientation(entity, sim::Quaternion(toSkyboltOriFromGlobal(mat)) * getOrientationOffset(oapiGetObjectType(object)));
 
-	// Update mesh for camera view
+	// Set 3d model visibility appropriately for camera view
 	auto visObject = entity.getFirstComponent<VisObjectsComponent>();
 	if (visObject)
 	{
@@ -690,7 +783,16 @@ void SkyboltClient::updateEntity(OBJHANDLE object, sim::Entity& entity) const
 			auto model = dynamic_cast<OrbiterModel*>(object.get());
 			if (model)
 			{
-				model->setVisible(isVisible(*model));
+				// Set model visible if it should be visible to either main or shadow cameras
+				bool visMainCamera = isVisibleInMainCamera(*model);
+				bool visShadowCamera = isVisibleInShadowCamera(*model);
+				model->setVisible(visMainCamera || visShadowCamera);
+
+				// Set model visibility flags appropriatly for main/shadow camera visibility
+				int mask = 0;
+				if (visMainCamera) mask |= vis::VisibilityCategory::defaultCategories;
+				if (visShadowCamera) mask |= vis::VisibilityCategory::shadowCaster;
+				model->setVisibilityCategoryMask(mask);
 
 				if (isVirtualCockpit)
 				{
@@ -717,37 +819,89 @@ SURFHANDLE SkyboltClient::getSurfaceHandleFromTextureId(MESHHANDLE mesh, int id)
 	}
 }
 
-void SkyboltClient::translateEntities()
+static OBJHANDLE getNearestObject(const std::vector<OBJHANDLE>& objects)
 {
-	std::map<OBJHANDLE, skybolt::sim::EntityPtr> currentEntities;
+	OBJHANDLE nearest = nullptr;
+	double nearestDistance;
+	for (const auto& object : objects)
+	{
+		VECTOR3 objectPos;
+		oapiGetGlobalPos(object, &objectPos);
 
+		VECTOR3 cameraPos;
+		oapiCameraGlobalPos(&cameraPos);
+		VECTOR3 diff = cameraPos - objectPos;
+		double distance = dotp(diff, diff);
+
+		if (!nearest || distance < nearestDistance)
+		{
+			nearest = object;
+			nearestDistance = distance;
+		}
+	}
+	return nearest;
+}
+
+static std::vector<OBJHANDLE> getObjectsToRender()
+{
 	std::vector<OBJHANDLE> objects;
+	std::vector<OBJHANDLE> planets;
 	int objectCount = oapiGetObjectCount();
 	for (int i = 0; i < objectCount; ++i)
 	{
-		objects.push_back(oapiGetObjectByIndex(i));
-	}
-
-	if (g_earth)
-	{
-		objectCount = oapiGetBaseCount(g_earth);
-		for (int i = 0; i < objectCount; ++i)
+		OBJHANDLE object = oapiGetObjectByIndex(i);
+		int type = oapiGetObjectType(object);
+		if (type == OBJTP_PLANET)
 		{
-			objects.push_back(oapiGetBaseByIndex(g_earth, i));
+			planets.push_back(object);
+		}
+		else if (type != OBJTP_SURFBASE)
+		{
+			objects.push_back(object);
 		}
 	}
 
+	// Only render the nearest planet and its bases
+	OBJHANDLE planet = getNearestObject(planets);
+	if (planet)
+	{
+		objects.push_back(planet);
+		objectCount = oapiGetBaseCount(planet);
+		for (int i = 0; i < objectCount; ++i)
+		{
+			objects.push_back(oapiGetBaseByIndex(planet, i));
+		}
+	}
+	return objects;
+}
+
+void SkyboltClient::translateEntities()
+{
+
+	std::vector<OBJHANDLE> objects = getObjectsToRender();
+
+	// Remove old entities
+	std::set<OBJHANDLE> objectsSet(objects.begin(), objects.end());
+	for (const auto& [handle, entity] : mEntities)
+	{
+		if (objectsSet.find(handle) == objectsSet.end())
+		{
+			mEngineRoot->simWorld->removeEntity(entity.get());
+		}
+	}
+
+	// Create and update entities
+	std::map<OBJHANDLE, skybolt::sim::EntityPtr> currentEntities;
 	for (const auto& object : objects)
 	{
 		sim::EntityPtr entity;
 		auto it = mEntities.find(object);
 		if (it == mEntities.end())
 		{
-			entity = createEntity(*mEntityFactory, object);
+			entity = mEntityFactory->createEntity(object);
 			if (entity)
 			{
-				if (object != g_earth)
-					updateEntity(object, *entity);
+				updateEntity(object, *entity);
 
 				mEngineRoot->simWorld->addEntity(entity);
 			}
@@ -755,8 +909,7 @@ void SkyboltClient::translateEntities()
 		else
 		{
 			entity = it->second;
-			if (object != g_earth)
-				updateEntity(object, *entity);
+			updateEntity(object, *entity);
 		}
 
 		if (entity)
@@ -765,25 +918,11 @@ void SkyboltClient::translateEntities()
 		}
 	}
 
-	// TODO: remove entities
 	std::swap(currentEntities, mEntities);
 }
 
 void SkyboltClient::clbkRenderScene()
 {
-	//return;
-	/*
-	while (GetRenderWindow())
-	{
-		MSG msg;
-		BOOL result = PeekMessageA(&msg, GetRenderWindow(), 0, 0, PM_REMOVE);
-		if (!result)
-		{
-			break;
-		}
-		RenderWndProc(msg.hwnd, msg.message, msg.wParam, msg.lParam);
-	}
-	*/
 	mEngineRoot->scenario.startJulianDate = oapiGetSimMJD() + 2400000.5;
 	updateCamera(*mSimCamera);
 	translateEntities();
