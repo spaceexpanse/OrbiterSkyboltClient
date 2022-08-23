@@ -9,6 +9,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 */
 
 #include "ModelFactory.h"
+#include "ObjectUtil.h"
 #include "OrbiterModel.h"
 #include "OrbiterTextureIds.h"
 
@@ -21,6 +22,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <osg/Geode>
 #include <osg/Geometry>
 #include <osg/CullFace>
+#include <osgUtil/TangentSpaceGenerator>
 
 #include <assert.h>
 
@@ -42,17 +44,29 @@ std::unique_ptr<OrbiterModel> ModelFactory::createModel(MESHHANDLE hMesh, OBJHAN
 	config.owningObject = handle;
 	config.meshId = meshId;
 	config.meshVisibilityCategoryFlags = meshVisibilityCategoryFlags;
-	config.meshGroupToGeometryIndex = result.meshGroupToGeometryIndex;
+	config.meshGroupData = result.meshGroupData;
 	return std::make_unique<OrbiterModel>(config);
+}
+
+static bool validateIndices(const MESHGROUP& data)
+{
+	for (int i = 0; i < (int)data.nIdx; ++i)
+	{
+		if (data.Idx[i] >= data.nVtx)
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 osg::ref_ptr<osg::Geometry> ModelFactory::createGeometry(const MESHGROUP& data)
 {
 	assert(data.nVtx > 0);
 	assert(data.nIdx > 0);
-	
+
 	osg::Geometry* geometry = new osg::Geometry();
-	
+
 	osg::Vec3Array* vertices = new osg::Vec3Array(data.nVtx);
 	osg::Vec3Array* normals = new osg::Vec3Array(data.nVtx);
 	osg::Vec2Array* uvs = new osg::Vec2Array(data.nVtx);
@@ -64,11 +78,11 @@ osg::ref_ptr<osg::Geometry> ModelFactory::createGeometry(const MESHGROUP& data)
 	{
 		const auto& v = data.Vtx[i];
 		// Note swap of coordinates from left-handed to right-handed
-		osg::Vec3f pos(v.z, v.x, -v.y);
+		osg::Vec3f pos = orbiterToSkyboltVector3BodyAxes(&v.x);
 		boundingBox.expandBy(pos);
 
 		(*vertices)[i] = pos;
-		(*normals)[i] = osg::Vec3f(v.nz, v.nx, -v.ny);
+		(*normals)[i] = orbiterToSkyboltVector3BodyAxes(&v.nx);
 		(*uvs)[i] = osg::Vec2f(v.tu, v.tv);
 	}
 
@@ -106,23 +120,24 @@ ModelFactory::CreateMeshResult ModelFactory::getOrCreateMesh(MESHHANDLE mesh) co
 
 		ModelFactory::CreateMeshResult result;
 		result.node = geode;
-		result.meshGroupToGeometryIndex.resize(nGrp);
+		result.meshGroupData.resize(nGrp);
 
 		for (DWORD i = 0; i < nGrp; i++)
 		{
 			MESHGROUP* group = oapiMeshGroup(mesh, i);
 			if (group->nVtx > 0 && group->nIdx > 0)
 			{
-				result.meshGroupToGeometryIndex[i] = geode->getNumDrawables();
+				MeshGroupData data;
+				data.osgGeometryIndex = geode->getNumDrawables();
+				data.orbiterMaterialIndex = group->MtrlIdx;
+				data.orbiterTextureIndex = group->TexIdx;
+				data.orbiterUserFlags = group->UsrFlag;
+				result.meshGroupData[i] = data;
 
 				auto geometry = createGeometry(*group);
 
-				populateStateSet(*geometry->getOrCreateStateSet(), mesh, *group);
+				prepareGeometryStateSet(*geometry, mesh, *group);
 				geode->addDrawable(geometry);
-			}
-			else
-			{
-				result.meshGroupToGeometryIndex[i] = -1;
 			}
 		}
 
@@ -138,26 +153,52 @@ static osg::Vec4f toOsgVec4f(const COLOUR4& c)
 	return reinterpret_cast<const osg::Vec4f&>(c);
 }
 
-void ModelFactory::populateStateSet(osg::StateSet& stateSet, MESHHANDLE mesh, const MESHGROUP& group) const
+void ModelFactory::prepareGeometryStateSet(osg::Geometry& geometry, MESHHANDLE mesh, const MESHGROUP& group) const
 {
 	if (group.TexIdx == SPEC_INHERIT)
 	{
 		return;
 	}
 
+	osg::StateSet& stateSet = *geometry.getOrCreateStateSet();
+	float specularity = 0.04;
+	stateSet.addUniform(new osg::Uniform("specularity", osg::Vec3f(specularity, specularity, specularity)));
+	stateSet.addUniform(new osg::Uniform("roughness", 0.5f));
+	stateSet.setDefine("ENABLE_SPECULAR");
+
 	if (group.TexIdx < TEXIDX_MFD0 || group.TexIdx == SPEC_DEFAULT) // not an MFD
 	{
-		osg::ref_ptr<osg::Texture2D> texture;
+		std::optional<TextureGroup> textureGroup;
 		if (group.TexIdx != SPEC_DEFAULT)
 		{
 			SURFHANDLE handle = mSurfaceHandleFromTextureIdProvider(mesh, group.TexIdx);
-			texture = mTextureProvider(handle);
+			textureGroup = mTextureProvider(handle);
 		}
 
-		if (texture)
+		if (textureGroup)
 		{
-			stateSet.setTextureAttributeAndModes(0, texture);
-			stateSet.addUniform(vis::createUniformSampler2d("albedoSampler", 0));
+			int unit = 0;
+			stateSet.setTextureAttributeAndModes(unit, textureGroup->albedo);
+			stateSet.addUniform(vis::createUniformSampler2d("albedoSampler", unit++));
+
+			if (textureGroup->normal)
+			{
+				stateSet.setTextureAttributeAndModes(unit, textureGroup->normal);
+				stateSet.addUniform(vis::createUniformSampler2d("normalSampler", unit++));
+				stateSet.setDefine("ENABLE_NORMAL_MAP");
+
+				osg::ref_ptr<osgUtil::TangentSpaceGenerator> tsg = new osgUtil::TangentSpaceGenerator();
+				tsg->generate(&geometry, 0);
+				geometry.setNormalArray(tsg->getNormalArray(), osg::Array::Binding::BIND_PER_VERTEX);
+				geometry.setTexCoordArray(1, tsg->getTangentArray());
+			}
+
+			if (textureGroup->specular)
+			{
+				stateSet.setTextureAttributeAndModes(unit, textureGroup->specular);
+				stateSet.addUniform(vis::createUniformSampler2d("specularSampler", unit++));
+				stateSet.setDefine("ENABLE_SPECULAR_MAP");
+			}
 
 			// All textured models in orbiter are rendered with alpha blending. They should be drawn in creation order, not transparent sorted.
 			// TODO: See if we can improve performance by disabling blending on models that don't need it. Unfortunatly orbiter doesn't

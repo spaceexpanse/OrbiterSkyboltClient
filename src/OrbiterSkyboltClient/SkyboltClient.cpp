@@ -29,22 +29,21 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <SkyboltEngine/EngineSettings.h>
 #include <SkyboltEngine/SimVisBinding/CameraSimVisBinding.h>
 #include <SkyboltEngine/VisObjectsComponent.h>
+#include <SkyboltEngine/WindowUtil.h>
+#include <SkyboltEnginePlugins/FftOcean/FftOceanPlugin.h>
 #include <SkyboltSim/Entity.h>
 #include <SkyboltSim/World.h>
 #include <SkyboltSim/CameraController/CameraControllerSelector.h>
 #include <SkyboltSim/Components/CameraComponent.h>
 #include <SkyboltSim/Components/CameraControllerComponent.h>
+#include <SkyboltSim/Spatial/Geocentric.h>
+#include <SkyboltSim/System/SimStepper.h>
+#include <SkyboltSim/System/System.h>
 #include <SkyboltVis/Camera.h>
 #include <SkyboltVis/OsgImageHelpers.h>
 #include <SkyboltVis/OsgStateSetHelpers.h>
 #include <SkyboltVis/OsgTextureHelpers.h>
-#include <SkyboltVis/RenderTarget/RenderTargetSceneAdapter.h>
-#include <SkyboltVis/RenderTarget/RenderTexture.h>
-#include <SkyboltVis/RenderTarget/Viewport.h>
-#include <SkyboltVis/RenderTarget/ViewportHelpers.h>
-#include <SkyboltSim/Spatial/Geocentric.h>
-#include <SkyboltSim/System/SimStepper.h>
-#include <SkyboltSim/System/System.h>
+#include <SkyboltVis/RenderOperation/DefaultRenderCameraViewport.h>
 #include <SkyboltVis/VisibilityCategory.h>
 #include <SkyboltVis/Window/EmbeddedWindow.h>
 #include <SkyboltCommon/MapUtility.h>
@@ -129,35 +128,58 @@ void SkyboltClient::clbkRefreshVideoData()
 	mVideoTab->UpdateConfigData();
 }
 
-static osg::ref_ptr<osg::Texture2D> readAlbedoTexture(const std::string& filename)
+static osg::ref_ptr<osg::Texture2D> readTilingSrgbTexture(const std::string& filename)
 {
-	auto image = osgDB::readImageFile(filename);
-	image->setInternalTextureFormat(vis::toSrgbInternalFormat(image->getInternalTextureFormat()));
-	osg::ref_ptr<osg::Texture2D> texture = new osg::Texture2D(image);
+	return vis::createTilingSrgbTexture(osgDB::readImageFile(filename));
+}
+
+static osg::ref_ptr<osg::Texture2D> readTilingLinearTexture(const std::string& filename)
+{
+	auto texture = new osg::Texture2D(osgDB::readImageFile(filename));
 	texture->setFilter(osg::Texture::FilterParameter::MIN_FILTER, osg::Texture::FilterMode::LINEAR_MIPMAP_LINEAR);
 	texture->setFilter(osg::Texture::FilterParameter::MAG_FILTER, osg::Texture::FilterMode::LINEAR);
+	texture->setWrap(osg::Texture::WRAP_S, osg::Texture::REPEAT);
+	texture->setWrap(osg::Texture::WRAP_T, osg::Texture::REPEAT);
 	return texture;
 }
 
 #define LOAD_TEXTURE_BIT_DONT_LOAD_MIPMAPS 4
+
+osg::ref_ptr<osg::Texture2D> loadTexture(const std::string& filename, DWORD flags, bool srgb)
+{
+	auto texture = srgb ? readTilingSrgbTexture(filename) : readTilingLinearTexture(filename);
+
+	if (flags & LOAD_TEXTURE_BIT_DONT_LOAD_MIPMAPS) // interpret this flag as disabling mipmaps
+	{
+		texture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
+		texture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
+		texture->setUseHardwareMipMapGeneration(false);
+	}
+	return texture;
+}
 
 SURFHANDLE SkyboltClient::clbkLoadTexture(const char *fname, DWORD flags)
 {
 	char cpath[256];
 	if (TexturePath(fname, cpath))
 	{
-		auto texture = readAlbedoTexture(std::string(cpath));
-
-		if (flags & LOAD_TEXTURE_BIT_DONT_LOAD_MIPMAPS) // interpret this flag as disabling mipmaps
+		namespace fs = std::filesystem;
+		fs::path path = cpath;
+		TextureGroup group;
+		group.albedo = loadTexture(path.string(), flags, /* srgb */ true);
+		
+		if (fs::path extraPath = addSuffixToBaseFilename(path, "_norm"); fs::exists(extraPath))
 		{
-			texture->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
-			texture->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
-			texture->setUseHardwareMipMapGeneration(false);
-
+			group.normal = loadTexture(extraPath.string(), flags, /* srgb */ false);
 		}
 
-		SURFHANDLE handle = (SURFHANDLE)texture.get();
-		mTextures[handle] = texture;
+		if (fs::path extraPath = addSuffixToBaseFilename(path, "_spec"); fs::exists(extraPath))
+		{
+			group.specular = loadTexture(extraPath.string(), flags, /* srgb */ true);
+		}
+
+		SURFHANDLE handle = (SURFHANDLE)group.albedo.get();
+		mTextures[handle] = group;
 		return handle;
 	}
 	return NULL;
@@ -172,6 +194,44 @@ void SkyboltClient::clbkReleaseTexture(SURFHANDLE hTex)
 {
 }
 
+static VISHANDLE entityToVisHandle(sim::Entity* entity)
+{
+	return reinterpret_cast<VISHANDLE>(entity);
+}
+
+static sim::Entity* visHandleToEntity(VISHANDLE handle)
+{
+	return reinterpret_cast<sim::Entity*>(handle);
+}
+
+//! @return null if not found
+static OrbiterModel* getOrbiterModel(const sim::Entity& entity, int index)
+{
+	auto visObject = entity.getFirstComponent<VisObjectsComponent>();
+	if (visObject)
+	{
+		int i = 0;
+		for (const auto& object : visObject->getObjects())
+		{
+			auto model = dynamic_cast<OrbiterModel*>(object.get());
+			if (model)
+			{
+				if (i == index)
+				{
+					return model;
+				}
+				++i;
+			}
+		}
+	}
+	return nullptr;
+}
+
+static OrbiterModel* meshHandleToOrbiterModel(DEVMESHHANDLE handle)
+{
+	return reinterpret_cast<OrbiterModel*>(handle);
+}
+
 int SkyboltClient::clbkVisEvent(OBJHANDLE hObj, VISHANDLE vis, DWORD msg, DWORD_PTR context)
 {
 	return -2;
@@ -179,13 +239,28 @@ int SkyboltClient::clbkVisEvent(OBJHANDLE hObj, VISHANDLE vis, DWORD msg, DWORD_
 
 MESHHANDLE SkyboltClient::clbkGetMesh(VISHANDLE vis, UINT idx)
 {
-	return NULL;
+	sim::Entity* entity = visHandleToEntity(vis);
+	return getOrbiterModel(*entity, idx);
+}
+
+int SkyboltClient::clbkGetMeshGroup(DEVMESHHANDLE hMesh, DWORD grpidx, GROUPREQUESTSPEC *grs)
+{
+	OrbiterModel* model = meshHandleToOrbiterModel(hMesh);
+	bool success = model->getMeshGroupData(grpidx, *grs);
+	return success ? 0 : -2;
+}
+
+int SkyboltClient::clbkEditMeshGroup(DEVMESHHANDLE hMesh, DWORD grpidx, GROUPEDITSPEC *ges)
+{
+	OrbiterModel* model = meshHandleToOrbiterModel(hMesh);
+	bool success = model->setMeshGroupData(grpidx, *ges);
+	return success ? 0 : -2;
 }
 
 ParticleStream* SkyboltClient::clbkCreateParticleStream(PARTICLESTREAMSPEC *pss)
 {
 	auto entityFinder = [this](OBJHANDLE vessel) {
-		return findOptional(mEntities, vessel).get_value_or(nullptr);
+		return findOptional(mEntities, vessel).value_or(nullptr);
 	};
 
 	auto destructionAction = [this](SkyboltParticleStream* stream) {
@@ -314,7 +389,7 @@ SURFHANDLE SkyboltClient::clbkCreateSurfaceEx(DWORD w, DWORD h, DWORD attrib)
 		SURFHANDLE handle = texture.get();
 		mTextures[handle] = texture;
 
-		mEngineRoot->scene->_getGroup()->addChild(camera);
+		mEngineRoot->scene->getBucketGroup(vis::Scene::Bucket::Default)->addChild(camera);
 
 		if (attrib & OAPISURFACE_SKETCHPAD)
 		{
@@ -342,8 +417,8 @@ bool SkyboltClient::clbkBlt(SURFHANDLE tgt, DWORD tgtx, DWORD tgty, SURFHANDLE s
 	auto texture = findOptional(mTextures, tgt);
 	if (texture)
 	{
-		int w = (*texture)->getTextureWidth();
-		int h = (*texture)->getTextureHeight();
+		int w = texture->albedo->getTextureWidth();
+		int h = texture->albedo->getTextureHeight();
 		return clbkBlt(tgt, tgtx, tgty, src, 0, 0, w, h, flag);
 	}
 	return false;
@@ -358,7 +433,7 @@ bool SkyboltClient::clbkBlt(SURFHANDLE tgt, DWORD tgtx, DWORD tgty, SURFHANDLE s
 		return false;
 	}
 
-	mTextureBlitter->blitTexture(**srcTexture, **dstTexture,
+	mTextureBlitter->blitTexture(*srcTexture->albedo, *dstTexture->albedo,
 		Box2i(glm::ivec2(srcx, srcy), glm::ivec2(srcx + w, srcy + h)),
 		Box2i(glm::ivec2(tgtx, tgty), glm::ivec2(tgtx + w, tgty + h)));
 	return true;
@@ -552,18 +627,20 @@ HWND SkyboltClient::clbkCreateRenderWindow()
 
 		nlohmann::json settings = readSettings(settingsFilename);
 
-		mEngineRoot = EngineRootFactory::create({}, settings);
+		std::vector<PluginFactory> enginePluginFactories = {&skybolt::plugins::createFftOceanPlugin};
+		mEngineRoot = EngineRootFactory::create(enginePluginFactories, settings);
 
 		mEngineRoot->tileSourceFactoryRegistry->addFactory("orbiterElevation", [](const nlohmann::json& json) {
 			return std::make_shared<OrbiterElevationTileSource>(json.at("url"));
 		});
 
 		mEngineRoot->tileSourceFactoryRegistry->addFactory("orbiterImage", [](const nlohmann::json& json) {
-			return std::make_shared<OrbiterImageTileSource>(json.at("url"));
+			auto layerType = (json.at("layerType") == "albedo") ? OrbiterImageTileSource::LayerType::Albedo : OrbiterImageTileSource::LayerType::LandMask;
+			return std::make_shared<OrbiterImageTileSource>(json.at("url"), layerType);
 		});
 
 		auto textureProvider = [this](SURFHANDLE surface) {
-			return findOptional(mTextures, surface).get_value_or(nullptr);
+			return findOptional(mTextures, surface);
 		};
 
 		std::shared_ptr<ModelFactory> modelFactory;
@@ -584,6 +661,7 @@ HWND SkyboltClient::clbkCreateRenderWindow()
 			config.scene = mEngineRoot->scene;
 			config.modelFactory = modelFactory;
 			config.shaderPrograms = &mEngineRoot->programs;
+			config.textureProvider = textureProvider;
 
 			mEntityFactory = std::make_unique<OrbiterEntityFactory>(config);
 		}
@@ -619,13 +697,12 @@ HWND SkyboltClient::clbkCreateRenderWindow()
 		mWindow = std::make_unique<vis::EmbeddedWindow>(windowConfig);
 
 		// Attach camera to window
-		osg::ref_ptr<vis::RenderTarget> viewport = createAndAddViewportToWindow(*mWindow, mEngineRoot->programs.getRequiredProgram("compositeFinal"));
-		viewport->setScene(std::make_shared<vis::RenderTargetSceneAdapter>(mEngineRoot->scene));
+		osg::ref_ptr<vis::RenderCameraViewport> viewport = createAndAddViewportToWindowWithEngine(*mWindow, *mEngineRoot);
 		viewport->setCamera(getVisCamera(*mSimCamera));
 
 		// Setup blitter
 		{
-			osg::ref_ptr<osg::Camera> osgCamera = mWindow->getRenderTargets().front().target->getOsgCamera();
+			osg::ref_ptr<osg::Camera> osgCamera = viewport->getFinalRenderTarget()->getOsgCamera();
 			mTextureBlitter = new TextureBlitter();
 			osgCamera->addPreDrawCallback(mTextureBlitter);
 		}
@@ -636,7 +713,7 @@ HWND SkyboltClient::clbkCreateRenderWindow()
 		// Create HUD panel overlay
 		{
 			mPanelGroup = new osg::Group();
-			osg::ref_ptr<osg::Camera> osgCamera = mWindow->getRenderTargets().back().target->getOsgCamera();
+			osg::ref_ptr<osg::Camera> osgCamera = viewport->getFinalRenderTarget()->getOsgCamera();
 			osgCamera->addChild(mPanelGroup);
 
 			auto program = mEngineRoot->programs.getRequiredProgram("hudGeometry");
@@ -702,7 +779,7 @@ static void updateCamera(sim::Entity& camera)
 	VECTOR3 gpos;
 	oapiCameraGlobalPos(&gpos);
 
-	setPosition(camera, toSkyboltVector3GlobalAxes(gpos));
+	setPosition(camera, orbiterToSkyboltVector3GlobalAxes(gpos));
 
 	MATRIX3 mat;
 	oapiCameraRotationMatrix(&mat);
@@ -727,7 +804,7 @@ void SkyboltClient::updateVirtualCockpitTextures(OrbiterModel& model) const
 			if (texture)
 			{
 				model.useMeshAsMfd(hudspec->ngroup, program, /* alphaBlend */ true);
-				model.setMeshTexture(hudspec->ngroup, *texture);
+				model.setMeshTexture(hudspec->ngroup, texture->albedo);
 			}
 		}
 	}
@@ -744,7 +821,7 @@ void SkyboltClient::updateVirtualCockpitTextures(OrbiterModel& model) const
 			if (texture)
 			{
 				model.useMeshAsMfd(mfdspec->ngroup, program, /* alphaBlend */ false);
-				model.setMeshTexture(mfdspec->ngroup, *texture);
+				model.setMeshTexture(mfdspec->ngroup, texture->albedo);
 			}
 		}
 	}
@@ -767,7 +844,7 @@ void SkyboltClient::updateEntity(OBJHANDLE object, sim::Entity& entity) const
 	VECTOR3 gpos;
 	oapiGetGlobalPos(object, &gpos);
 
-	setPosition(entity, toSkyboltVector3GlobalAxes(gpos));
+	setPosition(entity, orbiterToSkyboltVector3GlobalAxes(gpos));
 
 	MATRIX3 mat;
 	oapiGetRotationMatrix(object, &mat);
@@ -778,9 +855,9 @@ void SkyboltClient::updateEntity(OBJHANDLE object, sim::Entity& entity) const
 	if (visObject)
 	{
 		bool isVirtualCockpit = (oapiCameraInternal() && (object == oapiGetFocusObject()) && (oapiCockpitMode() == COCKPIT_VIRTUAL));
-		for (const auto& object : visObject->getObjects())
+		for (const auto& visObject : visObject->getObjects())
 		{
-			auto model = dynamic_cast<OrbiterModel*>(object.get());
+			auto model = dynamic_cast<OrbiterModel*>(visObject.get());
 			if (model)
 			{
 				// Set model visible if it should be visible to either main or shadow cameras
@@ -886,6 +963,7 @@ void SkyboltClient::translateEntities()
 	{
 		if (objectsSet.find(handle) == objectsSet.end())
 		{
+			UnregisterVisObject(handle);
 			mEngineRoot->simWorld->removeEntity(entity.get());
 		}
 	}
@@ -898,12 +976,24 @@ void SkyboltClient::translateEntities()
 		auto it = mEntities.find(object);
 		if (it == mEntities.end())
 		{
-			entity = mEntityFactory->createEntity(object);
+			try
+			{
+				entity = mEntityFactory->createEntity(object);
+			}
+			catch(const std::exception& e)
+			{
+				static std::set<OBJHANDLE> failedObjects;
+				if (failedObjects.insert(object).second)
+				{
+					BOOST_LOG_TRIVIAL(error) << "Could not create entity '" << getName(object) << "'. Error: " << e.what();
+				}
+			}
+
 			if (entity)
 			{
 				updateEntity(object, *entity);
-
 				mEngineRoot->simWorld->addEntity(entity);
+				RegisterVisObject(object, entityToVisHandle(entity.get()));
 			}
 		}
 		else

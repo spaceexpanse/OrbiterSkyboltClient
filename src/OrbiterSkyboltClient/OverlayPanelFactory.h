@@ -12,6 +12,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 #include "GraphicsAPI.h"
 #include "OrbiterTextureIds.h"
+#include "TextureProvider.h"
 
 #include <osg/Geode>
 #include <osg/Texture2D>
@@ -19,7 +20,6 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <functional>
 
 using WindowSizeProvider = std::function<osg::Vec2i()>;
-using TextureProvider = std::function<osg::ref_ptr<osg::Texture2D>(SURFHANDLE)>; //! Returns null if texture not found
 using MfdSurfaceProvider = std::function<SURFHANDLE(int mfdId)>; //! Returns null if MFD not found
 
 class OverlayPanelFactory

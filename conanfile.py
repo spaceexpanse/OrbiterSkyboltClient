@@ -3,7 +3,7 @@ import os
 
 class SkyboltConan(ConanFile):
     name = "orbiter-skybolt-client"
-    version = "1.0.1"
+    version = "1.0.3"
     settings = "os", "compiler", "arch", "build_type"
     options = {
 		"shared": [True, False]
@@ -17,8 +17,11 @@ class SkyboltConan(ConanFile):
 
     requires = [
 		"glew/2.2.0@_/_",
-		"skybolt/1.3.0@_/_"
+		"skybolt/1.4.0@_/_"
 	]
+
+    def configure(self):
+        self.options["skybolt"].shared_plugins = False
 
     def build(self):
         cmake = CMake(self)

@@ -13,6 +13,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #define OAPI_STATIC
 #include "GraphicsAPI.h"
 #include "TextureBlitter.h"
+#include "TextureGroup.h"
 
 #include <SkyboltEngine/SkyboltEngineFwd.h>
 #include <SkyboltSim/SkyboltSimFwd.h>
@@ -62,11 +63,13 @@ public:
 
 	int clbkVisEvent (OBJHANDLE hObj, VISHANDLE vis, DWORD msg, DWORD_PTR context) override;
 
+	//! @return type is actually DEVMESHHANDLE since we are a graphics client. MESHHANDLE is a hangover from inline graphics.
+	//! @idx is the mesh group index.
 	MESHHANDLE clbkGetMesh(VISHANDLE vis, UINT idx) override;
 
-	int clbkGetMeshGroup (DEVMESHHANDLE hMesh, DWORD grpidx, GROUPREQUESTSPEC *grs) override { return -2; }
+	int clbkGetMeshGroup (DEVMESHHANDLE hMesh, DWORD grpidx, GROUPREQUESTSPEC *grs) override;
 
-	int clbkEditMeshGroup (DEVMESHHANDLE hMesh, DWORD grpidx, GROUPEDITSPEC *ges) override { return -2; }
+	int clbkEditMeshGroup (DEVMESHHANDLE hMesh, DWORD grpidx, GROUPEDITSPEC *ges) override;
 
 	void clbkPreOpenPopup () override {}
 
@@ -191,7 +194,7 @@ private:
 
 	osg::ref_ptr<osg::Group> mPanelGroup;
 	std::map<OBJHANDLE, skybolt::sim::EntityPtr> mEntities;
-	std::map<SURFHANDLE, osg::ref_ptr<osg::Texture2D>> mTextures;
+	std::map<SURFHANDLE, TextureGroup> mTextures;
 	std::map<SURFHANDLE, std::shared_ptr<OsgSketchpad>> mSketchpads;
 	std::set<SkyboltParticleStream*> mParticleStreams;
 	osg::ref_ptr<TextureBlitter> mTextureBlitter;

@@ -6,37 +6,25 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
 */
 
 #pragma once
 
-#include <SkyboltVis/Renderable/Planet/Tile/TileSource/TileSource.h>
+#include "TextureProvider.h"
+#include <SkyboltVis/SkyboltVisFwd.h>
+#include <SkyboltEngine/SimVisBinding/SimVisBinding.h>
 
-class ZTreeMgr;
+class VESSEL;
 
-class OrbiterTileSource : public skybolt::vis::TileSource
+class Exhaust : public skybolt::SimpleSimVisBinding
 {
 public:
-	OrbiterTileSource(std::unique_ptr<ZTreeMgr> treeMgr);
-	~OrbiterTileSource() override;
+	Exhaust(VESSEL* vessel, const skybolt::sim::Entity* entity, const skybolt::vis::BeamsPtr& beams, const TextureProvider& textureProvider);
 
-	//!@ThreadSafe
-	osg::ref_ptr<osg::Image> createImage(const skybolt::QuadTreeTileKey& key, std::function<bool()> cancelSupplier) const;
-
-	//!@ThreadSafe
-	bool hasAnyChildren(const skybolt::QuadTreeTileKey& key) const override;
-
-	//! @returns the highest key with source data in the given key's ancestral hierarchy
-	//!@ThreadSafe
-	std::optional<skybolt::QuadTreeTileKey> getHighestAvailableLevel(const skybolt::QuadTreeTileKey& key) const  override;
-
-	const std::string& getCacheSha() const override  { static std::string s = "OrbiterTileSource"; return s; }
-
-protected:
-	virtual osg::ref_ptr<osg::Image> createImage(const std::uint8_t* buffer, std::size_t sizeBytes)const = 0;
+	void syncVis(const skybolt::GeocentricToNedConverter& converter) override;
 
 private:
-	std::unique_ptr<ZTreeMgr> mTreeMgr;
-	mutable std::mutex mTreeMgrMutex;
+	TextureProvider mTextureProvider;
+	VESSEL* mVessel;
+	skybolt::vis::BeamsPtr mBeams;
 };

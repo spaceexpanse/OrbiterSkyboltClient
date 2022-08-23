@@ -16,6 +16,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <SkyboltVis/Renderable/Billboard.h>
 #include <SkyboltVis/OsgImageHelpers.h>
 #include <SkyboltVis/OsgStateSetHelpers.h>
+#include <SkyboltVis/OsgTextureHelpers.h>
 #include <SkyboltEngine/VisObjectsComponent.h>
 #include <SkyboltEngine/SimVisBinding/SimVisBinding.h>
 
@@ -48,13 +49,13 @@ public:
 		oapiGetGlobalPos(mObjectHandle, &sunPosition);
 		oapiCameraGlobalPos(&cameraPosition);
 
-		setPosition(*mEntity, toSkyboltVector3GlobalAxes(sunPosition));
+		setPosition(*mEntity, orbiterToSkyboltVector3GlobalAxes(sunPosition));
 
 		// Set light direction
 		VECTOR3 dir = sunPosition - cameraPosition;
 		normalise(dir);
 
-		sim::Vector3 lightDirection = toSkyboltVector3GlobalAxes(dir);
+		sim::Vector3 lightDirection = orbiterToSkyboltVector3GlobalAxes(dir);
 		glm::vec3 tangent, bitangent;
 		math::getOrthonormalBasis(lightDirection, tangent, bitangent);
 		glm::mat3 m(lightDirection, tangent, bitangent);
@@ -77,8 +78,7 @@ EntityPtr createDistantCelestialBody(const DistantCelestialBodyCreationArgs& arg
 	depth->setWriteMask(false);
 	ss->setAttributeAndModes(depth, osg::StateAttribute::ON);
 
-	osg::Texture2D* texture = new osg::Texture2D(osgDB::readImageFile("Textures/Star.dds"));
-	texture->setInternalFormat(vis::toSrgbInternalFormat(texture->getInternalFormat()));
+	osg::ref_ptr<osg::Texture2D> texture = vis::createSrgbTexture(osgDB::readImageFile("Textures/Star.dds"));
 	ss->setTextureAttributeAndModes(0, texture);
 	ss->addUniform(vis::createUniformSampler2d("albedoSampler", 0));
 

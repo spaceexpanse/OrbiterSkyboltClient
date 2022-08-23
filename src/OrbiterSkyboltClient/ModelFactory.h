@@ -13,6 +13,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include "GraphicsAPI.h"
 
 #include "OrbiterModel.h"
+#include "TextureProvider.h"
 #include <SkyboltVis/SkyboltVisFwd.h>
 
 #include <osg/Program>
@@ -22,7 +23,6 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <memory>
 
 using SurfaceHandleFromTextureIdProvider = std::function<SURFHANDLE(MESHHANDLE mesh, int)>;
-using TextureProvider = std::function<osg::ref_ptr<osg::Texture2D>(SURFHANDLE)>; //! Returns null if texture not found
 
 struct ModelFactoryConfig
 {
@@ -43,10 +43,10 @@ private:
 	struct CreateMeshResult
 	{
 		osg::ref_ptr<osg::Node> node;
-		std::vector<int> meshGroupToGeometryIndex; //!< Maps orbiter mesh group ID to osg geometry ID. Index is -1 if the mesh group has no geometry
+		std::vector<std::optional<MeshGroupData>> meshGroupData;
 	};
 	ModelFactory::CreateMeshResult getOrCreateMesh(MESHHANDLE mesh) const;
-	void populateStateSet(osg::StateSet& stateSet, MESHHANDLE mesh, const MESHGROUP& group) const;
+	void prepareGeometryStateSet(osg::Geometry& geometry, MESHHANDLE mesh, const MESHGROUP& group) const;
 
 private:
 	SurfaceHandleFromTextureIdProvider mSurfaceHandleFromTextureIdProvider;
